@@ -145,6 +145,14 @@
     </div>
   </header>
 
+  <div id="syncBar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;padding:8px 12px;border:1px solid #2a3040;border-radius:10px;background:#141924;font-size:13px;color:#c7ccd6;">
+    <strong style="color:#e8eaed;">☁ Cloud sync</strong>
+    <input id="syncCode" type="text" placeholder="private sync code (10+ chars)" autocomplete="off" spellcheck="false" style="flex:0 1 240px;padding:6px 9px;border-radius:7px;border:1px solid #39404d;background:#0e131b;color:#e8eaed;font-size:13px;"/>
+    <button class="btn" id="syncSaveBtn">Link this device</button>
+    <button class="btn" id="syncPullBtn" title="Pull the latest from the cloud">↻ Refresh</button>
+    <span id="syncStatus" style="opacity:.85;margin-left:2px;"></span>
+  </div>
+
   <div class="runalert" id="runAlert"></div>
 
   <div class="modebar">
@@ -268,7 +276,38 @@ function migrate(s){
   delete s.mine; delete s.gone; return s;
 }
 function loadState(){ try{const s=migrate(JSON.parse(localStorage.getItem(L.storage))); state=s?Object.assign(defaultState(),s):defaultState();}catch(e){state=defaultState();} }
-function saveState(){ try{localStorage.setItem(L.storage,JSON.stringify(state));}catch(e){} }
+function saveLocalOnly(){ try{localStorage.setItem(L.storage,JSON.stringify(state));}catch(e){} }
+function saveState(){ state.__ts=Date.now(); saveLocalOnly(); scheduleCloudPush(); }
+/* ---- Cloud sync (cross-device) ---- */
+const SYNC_URL="https://ff-draft-sync.mr-twills.workers.dev";
+function syncCode(){ try{return (localStorage.getItem("draft_sync_code")||"").trim();}catch(e){return "";} }
+function syncOn(){ return SYNC_URL.indexOf("http")===0 && syncCode().length>=10; }
+function cloudKey(){ return syncCode()+"::"+(L?L.storage:"g"); }
+let _pushT=null;
+function syncStatus(m){ var el=document.getElementById("syncStatus"); if(el) el.textContent=m; }
+function scheduleCloudPush(){ if(!syncOn()) return; clearTimeout(_pushT); _pushT=setTimeout(cloudPush,700); }
+function cloudPush(){
+  if(!syncOn()) return;
+  syncStatus("saving…");
+  fetch(SYNC_URL+"/?key="+encodeURIComponent(cloudKey()),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ts:state.__ts||Date.now(),state:state})})
+    .then(function(r){ syncStatus(r.ok?("synced ✓ "+new Date().toLocaleTimeString()):"sync error"); })
+    .catch(function(){ syncStatus("offline — will retry"); });
+}
+function cloudPull(){
+  if(!syncOn()) return;
+  syncStatus("checking…");
+  fetch(SYNC_URL+"/?key="+encodeURIComponent(cloudKey()))
+    .then(function(r){ return r.ok?r.json():null; })
+    .then(function(j){
+      if(j && j.state && Array.isArray(j.state.picks)){
+        var cloudTs=j.ts||0, localTs=(state&&state.__ts)||0;
+        if(cloudTs>localTs){ state=Object.assign(defaultState(), j.state); state.__ts=cloudTs; saveLocalOnly(); render(); syncStatus("synced ✓ "+new Date().toLocaleTimeString()); }
+        else if(localTs>cloudTs){ cloudPush(); }
+        else { syncStatus("synced ✓"); }
+      } else { syncStatus("linked ✓ (nothing saved yet)"); if((state.picks||[]).length) cloudPush(); }
+    })
+    .catch(function(){ syncStatus("offline"); });
+}
 
 // derived pick views (source depends on mode: assistant = saved real draft; mock = in-memory sim)
 let mode = (function(){try{return localStorage.getItem("draft_mode")||"assistant";}catch(e){return "assistant";}})();
@@ -647,7 +686,7 @@ function useLeague(key){
   loadState();
   document.getElementById("hTitle").textContent=L.title;
   document.getElementById("hSub").textContent=L.sub;
-  document.getElementById("foot").textContent=L.foot+" Progress saves automatically per league in this browser.";
+  document.getElementById("foot").textContent=L.foot+" Progress saves automatically; add a cloud sync code to pick up on any device.";
   document.title=L.title;
   document.getElementById("setTeams").value=state.teams;
   document.getElementById("setSlot").value=state.slot;
@@ -657,6 +696,7 @@ function useLeague(key){
   resetMockState();
   const ms=document.getElementById("mockSlot"); if(ms){ ms.max=L.teams; if((parseInt(ms.value)||1)>L.teams) ms.value=1; }
   render();
+  cloudPull();
 }
 function buildTabs(){
   const tabs=document.getElementById("tabs");
@@ -685,6 +725,25 @@ document.getElementById("startMockBtn").addEventListener("click",()=>{ const s=p
 // ---- Init ----
 buildTabs();
 useLeague(activeKey());
+
+// ---- Cloud sync wiring ----
+(function(){
+  var codeEl=document.getElementById("syncCode");
+  var saveBtn=document.getElementById("syncSaveBtn");
+  var pullBtn=document.getElementById("syncPullBtn");
+  if(codeEl) codeEl.value=syncCode();
+  function link(){
+    var c=(codeEl.value||"").trim();
+    if(c.length<10){ syncStatus("code must be 10+ characters"); return; }
+    try{localStorage.setItem("draft_sync_code",c);}catch(e){}
+    syncStatus("linking…"); cloudPull();
+  }
+  if(saveBtn) saveBtn.addEventListener("click",link);
+  if(codeEl) codeEl.addEventListener("keydown",function(e){ if(e.key==="Enter") link(); });
+  if(pullBtn) pullBtn.addEventListener("click",function(){ if(!syncOn()){ syncStatus("enter a code first"); return;} cloudPull(); });
+  window.addEventListener("focus",function(){ if(syncOn()) cloudPull(); });
+  if(!syncOn()) syncStatus(syncCode()?"":"off — add a code to sync across devices");
+})();
 </script>
 </body>
 </html>
