@@ -153,6 +153,15 @@
     <span id="syncStatus" style="opacity:.85;margin-left:2px;"></span>
   </div>
 
+  <div id="slBar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;padding:8px 12px;border:1px solid #4a2a2a;border-radius:10px;background:#181017;font-size:13px;color:#e8d9d9;">
+    <strong style="color:#ff6b6b;">&#9679; Sleeper Live</strong>
+    <label style="display:flex;align-items:center;gap:5px;color:#c7ccd6;">Draft ID <input id="slDraftId" type="text" spellcheck="false" value="1390071140906450944" style="width:190px;padding:6px 9px;border-radius:7px;border:1px solid #39404d;background:#0e131b;color:#e8eaed;font-size:13px;"/></label>
+    <label style="display:flex;align-items:center;gap:5px;color:#c7ccd6;">My seat <input id="slSlot" type="number" min="1" max="32" style="width:56px;padding:6px 7px;border-radius:7px;border:1px solid #39404d;background:#0e131b;color:#e8eaed;font-size:13px;"/></label>
+    <button class="btn" id="slToggle">&#9679; Go live</button>
+    <span id="slStatus" style="opacity:.9;"></span>
+    <div id="slClock" style="flex-basis:100%;color:#cfe4ff;font-size:12.5px;margin-top:2px;"></div>
+  </div>
+
   <div class="runalert" id="runAlert"></div>
 
   <div class="modebar">
@@ -188,6 +197,7 @@
         <h2>Next up (smart alternates)</h2>
         <div id="altBox"></div>
       </div>
+      <div class="panel" id="slGradesPanel" style="display:none"></div>
     </div>
     <div class="right">
       <div class="panel">
@@ -288,6 +298,7 @@ function syncStatus(m){ var el=document.getElementById("syncStatus"); if(el) el.
 function scheduleCloudPush(){ if(!syncOn()) return; clearTimeout(_pushT); _pushT=setTimeout(cloudPush,700); }
 function cloudPush(){
   if(!syncOn()) return;
+  if(slOn()) return;
   syncStatus("saving…");
   fetch(SYNC_URL+"/?key="+encodeURIComponent(cloudKey()),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ts:state.__ts||Date.now(),state:state})})
     .then(function(r){ syncStatus(r.ok?("synced ✓ "+new Date().toLocaleTimeString()):"sync error"); })
@@ -295,6 +306,7 @@ function cloudPush(){
 }
 function cloudPull(){
   if(!syncOn()) return;
+  if(slOn()) return;
   syncStatus("checking…");
   fetch(SYNC_URL+"/?key="+encodeURIComponent(cloudKey()))
     .then(function(r){ return r.ok?r.json():null; })
@@ -744,6 +756,102 @@ useLeague(activeKey());
   window.addEventListener("focus",function(){ if(syncOn()) cloudPull(); });
   if(!syncOn()) syncStatus(syncCode()?"":"off — add a code to sync across devices");
 })();
+
+/* ============ Sleeper live draft sync ============ */
+const SL_LEAGUE="guillotine";
+const SL_SLOTNAMES={"12": "markgm", "3": "Pittsburgh Pops", "15": "Blumpkin Spice Latte", "9": "Spicy B", "13": "Mike\u2019s Vegetable Farm", "6": "Steve Dickbag", "2": "Crackiswhack", "1": "Wonderbread719", "8": "Let Them Eat Cake", "4": "rhbenson87", "14": "Shane Falcos Quicksand", "10": "Ryan", "17": "greg284", "16": "bwinter24", "11": "One of the few", "5": "sbikson", "7": "kitchencrew9", "18": "Data Center"};
+let slTimer=null, slMeta=null, slRawPicks=[];
+function slGet(k,d){ try{var v=localStorage.getItem(k); return v===null?d:v;}catch(e){return d;} }
+function slSet(k,v){ try{localStorage.setItem(k,v);}catch(e){} }
+function slOn(){ return slGet("sl_on","0")==="1"; }
+function slDraftId(){ var v=(slGet("sl_draft_id","")||"").trim(); if(!v){ var el=document.getElementById("slDraftId"); v=el?(el.value||"").trim():""; } return v; }
+function slMySlot(){ return parseInt(slGet("sl_slot","18"))||18; }
+function slNorm(n){ return (n||"").normalize("NFKD").replace(/[^\x00-\x7f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").split(/\s+/).filter(function(t){return ["jr","sr","ii","iii","iv","v"].indexOf(t)<0;}).join(" "); }
+function slStatus(m){ var e=document.getElementById("slStatus"); if(e) e.textContent=m; }
+function slClock(m){ var e=document.getElementById("slClock"); if(e) e.innerHTML=m; }
+function slName2Rank(){ var m={}; L.players.forEach(function(p){ m[slNorm(p.name)]=p.rank; }); return m; }
+function slSlotOnClock(pk,teams){ var idx=(pk-1)%teams, r=Math.ceil(pk/teams); return r%2===1?idx+1:teams-idx; }
+function slApply(picks){
+  slRawPicks=picks;
+  var n2r=slName2Rank(), mine=slMySlot(), seen={}, np=[];
+  picks.forEach(function(q){ var md=q.metadata||{}; var rk=n2r[slNorm((md.first_name||"")+" "+(md.last_name||""))];
+    if(rk!=null && !seen[rk]){ seen[rk]=1; np.push({r:rk, m:(q.draft_slot===mine)}); } });
+  state.picks=np; state.slot=mine; if(slMeta&&slMeta.teams) state.teams=slMeta.teams;
+  saveLocalOnly();
+  var st=document.getElementById("setTeams"), ss=document.getElementById("setSlot");
+  if(st) st.value=state.teams; if(ss) ss.value=state.slot;
+  render(); renderSlGrades();
+  var cur=picks.length+1, onClk=slSlotOnClock(cur,state.teams||18);
+  var nn=myNextPickNo(), myNext=nn.pick, away=myNext-cur;
+  var who=(SL_SLOTNAMES[onClk]||("seat "+onClk));
+  slClock("On the clock: <b>"+who+"</b>"+(onClk===mine?" &mdash; <b style='color:#25d366'>YOU</b>":"")+" &middot; your next: <b>#"+myNext+"</b> "+(away<=0?"(now)":"("+away+" away)")+" &middot; "+picks.length+" picked");
+}
+function renderSlGrades(){
+  var panel=document.getElementById("slGradesPanel"); if(!panel) return;
+  if(!slOn() || !slRawPicks.length || activeKey()!==SL_LEAGUE){ panel.style.display="none"; return; }
+  var teams=(slMeta&&slMeta.teams)||state.teams||18;
+  var bySlot={}; for(var s=1;s<=teams;s++) bySlot[s]=[];
+  slRawPicks.forEach(function(q){ if(bySlot[q.draft_slot]) bySlot[q.draft_slot].push(q); });
+  var minN=Infinity; for(var s2=1;s2<=teams;s2++) minN=Math.min(minN,bySlot[s2].length); if(!isFinite(minN)) minN=0;
+  var n2r=slName2Rank(), rows=[];
+  for(var s3=1;s3<=teams;s3++){
+    var ps=bySlot[s3].slice().sort(function(a,b){return a.pick_no-b.pick_no;}).slice(0,minN);
+    var v=0, anchor=null, pc={};
+    ps.forEach(function(q){ var rk=n2r[slNorm((q.metadata.first_name||"")+" "+(q.metadata.last_name||""))]; var pl=(rk!=null)?P[rk]:null; if(pl){ v+=pl.vorp; pc[pl.pos]=(pc[pl.pos]||0)+1; if(!anchor||pl.vorp>anchor.vorp)anchor=pl; } });
+    rows.push({s:s3,name:(SL_SLOTNAMES[s3]||("Seat "+s3)),v:v,anchor:anchor,pc:pc,n:bySlot[s3].length});
+  }
+  var vals=rows.map(function(r){return r.v;}), mean=vals.reduce(function(a,b){return a+b;},0)/(rows.length||1);
+  var sd=Math.sqrt(vals.reduce(function(a,b){return a+(b-mean)*(b-mean);},0)/(rows.length||1))||1;
+  rows.forEach(function(r){ r.g=letterFor((r.v-mean)/sd); r.d=r.v-mean; });
+  rows.sort(function(a,b){return b.v-a.v;});
+  var mine=slMySlot();
+  panel.style.display="block";
+  panel.innerHTML='<h2>Live draft grades <span style="color:var(--dim);font-size:11px;font-weight:400">through R'+minN+' &middot; equal picks</span></h2>'+
+    rows.map(function(r,i){
+      var chips=Object.keys(r.pc).map(function(k){return '<span class="teamtag">'+r.pc[k]+k+'</span>';}).join(" ");
+      return '<div style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-top:1px solid var(--line);'+(r.s===mine?'background:rgba(88,166,255,.10);border-radius:6px;':'')+'">'+
+        '<span style="width:20px;text-align:center;color:var(--dim);font-weight:700">'+(i+1)+'</span>'+
+        '<span style="width:30px;text-align:center;font-weight:800;color:var(--gold)">'+r.g+'</span>'+
+        '<span style="flex:1;min-width:0"><b>'+r.name+(r.s===mine?" (You)":"")+'</b> <span style="color:var(--dim);font-size:11px">'+(r.anchor?"&#9733;"+r.anchor.name.split(" ").slice(-1)[0]+" ":"")+chips+'</span></span>'+
+        '<span style="text-align:right;font-variant-numeric:tabular-nums"><b>'+r.v.toFixed(0)+'</b> <span style="color:var(--dim);font-size:11px">'+(r.d>=0?"+":"")+r.d.toFixed(0)+'</span></span>'+
+      '</div>';
+    }).join("");
+}
+function slPoll(){
+  if(!slOn()) return;
+  if(activeKey()!==SL_LEAGUE){ slStatus("paused — open the "+LEAGUES[SL_LEAGUE].tab+" tab"); return; }
+  var id=slDraftId(); if(!id){ slStatus("enter your Sleeper draft ID"); return; }
+  var base="https://api.sleeper.app/v1/draft/"+id;
+  var metaP=(!slMeta||slMeta.id!==id)?fetch(base,{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(mj){ if(mj) slMeta={id:id,teams:(mj.settings&&mj.settings.teams)||18}; }).catch(function(){}):Promise.resolve();
+  metaP.then(function(){ return fetch(base+"/picks",{cache:"no-store"}); })
+    .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+    .then(function(p){ slApply(p); slStatus("live ✓ "+new Date().toLocaleTimeString()); })
+    .catch(function(e){ slStatus("reconnecting… ["+((e&&e.message)||e)+"]"); });
+}
+function slStart(){
+  slSet("sl_on","1");
+  if(activeKey()!==SL_LEAGUE) useLeague(SL_LEAGUE);
+  if(mode!=="assistant") setMode("assistant");
+  var t=document.getElementById("slToggle"); if(t){ t.innerHTML="&#9632; Stop live"; t.style.background="#b3261e"; t.style.borderColor="#ff5470"; t.style.color="#fff"; }
+  slStatus("connecting…"); slPoll();
+  clearInterval(slTimer); slTimer=setInterval(slPoll,8000);
+}
+function slStop(){
+  slSet("sl_on","0"); clearInterval(slTimer); slTimer=null;
+  var t=document.getElementById("slToggle"); if(t){ t.innerHTML="&#9679; Go live"; t.style.background=""; t.style.borderColor=""; t.style.color=""; }
+  slStatus("stopped"); slClock(""); var g=document.getElementById("slGradesPanel"); if(g) g.style.display="none";
+}
+(function(){
+  if(!slDraftId()) slSet("sl_draft_id","1390071140906450944");
+  var idEl=document.getElementById("slDraftId"), slotEl=document.getElementById("slSlot"), tog=document.getElementById("slToggle");
+  if(idEl) idEl.value=slDraftId();
+  if(slotEl) slotEl.value=slMySlot();
+  if(idEl) idEl.addEventListener("change",function(){ slSet("sl_draft_id",idEl.value.trim()); slMeta=null; if(slOn()) slPoll(); });
+  if(slotEl) slotEl.addEventListener("change",function(){ slSet("sl_slot",String(parseInt(slotEl.value)||18)); if(slOn()) slPoll(); });
+  if(tog) tog.addEventListener("click",function(){ slOn()?slStop():slStart(); });
+  if(slOn()) slStart();
+})();
+
 </script>
 </body>
 </html>
